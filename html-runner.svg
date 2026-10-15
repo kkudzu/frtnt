@@ -6,17 +6,30 @@
     <xhtml:div xmlns="http://www.w3.org/1999/xhtml" class="stage">
       <xhtml:button id="upload" type="button">Upload HTML</xhtml:button>
       <xhtml:input id="file" type="file" accept=".html,.htm,text/html" hidden="hidden" />
+      <xhtml:p id="status" role="status" aria-live="polite"></xhtml:p>
+      <xhtml:section id="library" aria-labelledby="library-title">
+        <xhtml:h1 id="library-title">Saved in this browser</xhtml:h1>
+        <xhtml:ul id="saved-files"></xhtml:ul>
+      </xhtml:section>
     </xhtml:div>
   </foreignObject>
   <style>
     .stage {
+      box-sizing: border-box;
       width: 100%;
       height: 100%;
-      display: grid;
-      place-items: center;
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      overflow: auto;
+      color: #1c2924;
       font-family: ui-sans-serif, system-ui, sans-serif;
     }
-    button {
+    button { cursor: pointer; }
+    #upload {
       min-width: 180px;
       min-height: 56px;
       padding: 0 28px;
@@ -25,56 +38,115 @@
       background: #174b3b;
       color: #fff;
       font: 600 16px ui-sans-serif, system-ui, sans-serif;
-      cursor: pointer;
     }
-    button:hover { background: #103b2f; }
-    button:focus-visible { outline: 3px solid #d28a38; outline-offset: 4px; }
+    #upload:hover { background: #103b2f; }
+    button:focus-visible { outline: 3px solid #d28a38; outline-offset: 3px; }
+    button:disabled { cursor: wait; opacity: .65; }
+    #status { min-height: 18px; margin: 0; color: #53645b; font-size: 13px; }
+    #library { width: min(560px, 100%); max-height: 290px; display: flex; flex-direction: column; gap: 8px; }
+    h1 { margin: 0; font-size: 14px; font-weight: 650; }
+    #saved-files { margin: 0; padding: 0; overflow: auto; list-style: none; }
+    #saved-files li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid #d8dfda; }
+    .file-name { overflow: hidden; color: #1c2924; font-size: 14px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+    .file-size { margin-top: 3px; color: #64736b; font-size: 12px; }
+    .file-actions { display: flex; gap: 6px; }
+    .file-actions button { min-height: 34px; padding: 0 11px; border: 1px solid #c7d1ca; border-radius: 3px; background: #fff; color: #174b3b; font: 600 12px ui-sans-serif, system-ui, sans-serif; }
+    .file-actions button:hover { background: #e7eee9; }
+    .empty-state { padding: 12px 0; color: #64736b; font-size: 13px; }
   </style>
   <script><![CDATA[
     const upload = document.getElementById('upload');
     const fileInput = document.getElementById('file');
+    const statusText = document.getElementById('status');
+    const savedFiles = document.getElementById('saved-files');
     let resultTab;
-    let newTabForSelection = false;
     let choosingFile = false;
+    let databasePromise;
 
-    function finishSelection() {
-      choosingFile = false;
-      fileInput.value = '';
-      if (newTabForSelection && resultTab && !resultTab.closed) {
-        resultTab.close();
-        resultTab = null;
-      }
-      newTabForSelection = false;
-    }
-
-    upload.addEventListener('click', () => {
-      if (choosingFile) return;
-      choosingFile = true;
-      fileInput.click();
-    });
-
-    fileInput.addEventListener('change', () => {
-      const file = fileInput.files && fileInput.files[0];
-      if (!file) {
-        finishSelection();
-        return;
-      }
-
-      const objectUrl = URL.createObjectURL(file);
-      try {
-        if (!resultTab || resultTab.closed) {
-          resultTab = window.open('about:blank', '_blank');
-          newTabForSelection = true;
-        } else {
-          resultTab.focus();
-        }
-        if (!resultTab) {
-          newTabForSelection = false;
-          URL.revokeObjectURL(objectUrl);
-          window.alert('Allow pop-ups for this page, then upload the file again.');
+    function openDatabase() {
+      if (databasePromise) return databasePromise;
+      databasePromise = new Promise((resolve, reject) => {
+        if (!window.indexedDB) {
+          reject(new Error('IndexedDB is unavailable.'));
           return;
         }
-        const tab = resultTab;
+        const request = indexedDB.open('html-runner-library', 1);
+        request.onupgradeneeded = () => {
+          const database = request.result;
+          database.createObjectStore('files', { keyPath: 'id' });
+          database.createObjectStore('content');
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+        request.onblocked = () => reject(new Error('The local library is blocked.'));
+      });
+      return databasePromise;
+    }
+
+    function saveFile(file) {
+      return openDatabase().then(database => new Promise((resolve, reject) => {
+        const id = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const transaction = database.transaction(['files', 'content'], 'readwrite');
+        transaction.objectStore('files').put({ id, name: file.name, size: file.size, savedAt: Date.now() });
+        transaction.objectStore('content').put(file, id);
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error || new Error('Could not save the file.'));
+        transaction.onabort = () => reject(transaction.error || new Error('Could not save the file.'));
+      }));
+    }
+
+    function getSavedFiles() {
+      return openDatabase().then(database => new Promise((resolve, reject) => {
+        const request = database.transaction('files').objectStore('files').getAll();
+        request.onsuccess = () => resolve(request.result.sort((first, second) => second.savedAt - first.savedAt));
+        request.onerror = () => reject(request.error);
+      }));
+    }
+
+    function getFileContent(id) {
+      return openDatabase().then(database => new Promise((resolve, reject) => {
+        const request = database.transaction('content').objectStore('content').get(id);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      }));
+    }
+
+    function removeSavedFile(id) {
+      return openDatabase().then(database => new Promise((resolve, reject) => {
+        const transaction = database.transaction(['files', 'content'], 'readwrite');
+        transaction.objectStore('files').delete(id);
+        transaction.objectStore('content').delete(id);
+        transaction.oncomplete = resolve;
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      }));
+    }
+
+    function formatSize(bytes) {
+      if (bytes < 1024) return `${bytes} B`;
+      const units = ['KB', 'MB', 'GB', 'TB'];
+      let size = bytes / 1024;
+      let unit = 0;
+      while (size >= 1024 && unit < units.length - 1) {
+        size /= 1024;
+        unit += 1;
+      }
+      return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[unit]}`;
+    }
+
+    function getResultTab() {
+      if (!resultTab || resultTab.closed) {
+        resultTab = window.open('about:blank', '_blank');
+        if (!resultTab) return null;
+        return { tab: resultTab, created: true };
+      }
+      resultTab.focus();
+      return { tab: resultTab, created: false };
+    }
+
+    function displayFile(tab, file, name) {
+      const objectUrl = URL.createObjectURL(file);
+      try {
         if (!tab.__htmlRunnerReady) {
           tab.document.open();
           tab.document.write('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HTML file</title><style>html,body,iframe{width:100%;height:100%;margin:0;border:0;display:block}</style></head><body><iframe id="document"></iframe><script>window.addEventListener("pagehide",function(){if(window.opener&&window.__htmlObjectUrl)window.opener.URL.revokeObjectURL(window.__htmlObjectUrl)})<\/script></body></html>');
@@ -84,7 +156,7 @@
         const frame = tab.document.getElementById('document');
         const previousUrl = tab.__htmlObjectUrl;
         tab.__htmlObjectUrl = objectUrl;
-        tab.document.title = file.name;
+        tab.document.title = name;
         if (previousUrl) {
           frame.addEventListener('load', () => {
             if (!tab.closed) frame.src = objectUrl;
@@ -94,19 +166,109 @@
         } else {
           frame.src = objectUrl;
         }
-        newTabForSelection = false;
       } catch (error) {
         URL.revokeObjectURL(objectUrl);
-        if (resultTab && !resultTab.closed && newTabForSelection) resultTab.close();
-        if (newTabForSelection) resultTab = null;
-        newTabForSelection = false;
-        window.alert('This browser could not open the selected file.');
-      } finally {
-        choosingFile = false;
-        fileInput.value = '';
+        throw error;
       }
+    }
+
+    function openSavedFile(entry) {
+      const target = getResultTab();
+      if (!target) {
+        statusText.textContent = 'Allow pop-ups to open saved files.';
+        return;
+      }
+      statusText.textContent = 'Opening ' + entry.name + '...';
+      getFileContent(entry.id).then(file => {
+        if (!file) throw new Error('Saved file is missing.');
+        if (!target.tab.closed) displayFile(target.tab, file, entry.name);
+        statusText.textContent = '';
+      }).catch(() => {
+        if (target.created && !target.tab.closed) target.tab.close();
+        statusText.textContent = 'Could not open this saved file.';
+      });
+    }
+
+    function renderLibrary() {
+      return getSavedFiles().then(files => {
+        savedFiles.replaceChildren();
+        if (!files.length) {
+          const empty = document.createElement('li');
+          empty.className = 'empty-state';
+          empty.textContent = 'No saved HTML files';
+          savedFiles.append(empty);
+          return;
+        }
+        for (const entry of files) {
+          const row = document.createElement('li');
+          const details = document.createElement('div');
+          const name = document.createElement('div');
+          const size = document.createElement('div');
+          const actions = document.createElement('div');
+          const open = document.createElement('button');
+          const remove = document.createElement('button');
+          name.className = 'file-name';
+          name.textContent = entry.name;
+          size.className = 'file-size';
+          size.textContent = formatSize(entry.size);
+          details.append(name, size);
+          actions.className = 'file-actions';
+          open.type = 'button';
+          open.textContent = 'Open';
+          open.setAttribute('aria-label', 'Open ' + entry.name);
+          open.addEventListener('click', () => openSavedFile(entry));
+          remove.type = 'button';
+          remove.textContent = 'Remove';
+          remove.setAttribute('aria-label', 'Remove ' + entry.name);
+          remove.addEventListener('click', () => {
+            remove.disabled = true;
+            removeSavedFile(entry.id).then(renderLibrary).then(() => {
+              statusText.textContent = 'Removed ' + entry.name + ' from this browser.';
+            }).catch(() => {
+              remove.disabled = false;
+              statusText.textContent = 'Could not remove this file.';
+            });
+          });
+          actions.append(open, remove);
+          row.append(details, actions);
+          savedFiles.append(row);
+        }
+      });
+    }
+
+    upload.addEventListener('click', () => {
+      if (choosingFile || upload.disabled) return;
+      choosingFile = true;
+      fileInput.click();
     });
 
-    fileInput.addEventListener('cancel', finishSelection);
+    fileInput.addEventListener('change', () => {
+      choosingFile = false;
+      const file = fileInput.files && fileInput.files[0];
+      fileInput.value = '';
+      if (!file) return;
+      upload.disabled = true;
+      upload.textContent = 'Saving...';
+      statusText.textContent = 'Saving locally...';
+      Promise.resolve().then(() => {
+        if (navigator.storage && navigator.storage.persist) return navigator.storage.persist().catch(() => false);
+      }).then(() => saveFile(file)).then(() => renderLibrary()).then(() => {
+        statusText.textContent = 'Saved in this browser.';
+      }).catch(() => {
+        statusText.textContent = 'Could not save. Browser storage may be full or unavailable.';
+      }).finally(() => {
+        upload.disabled = false;
+        upload.textContent = 'Upload HTML';
+      });
+    });
+
+    fileInput.addEventListener('cancel', () => {
+      choosingFile = false;
+      fileInput.value = '';
+    });
+
+    renderLibrary().catch(() => {
+      statusText.textContent = 'Local storage is unavailable in this browser context.';
+    });
   ]]></script>
 </svg>
