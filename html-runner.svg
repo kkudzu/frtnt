@@ -60,6 +60,7 @@
     const statusText = document.getElementById('status');
     const savedFiles = document.getElementById('saved-files');
     let resultTab;
+    let selectedFile;
     let choosingFile = false;
     let databasePromise;
 
@@ -73,8 +74,8 @@
         const request = indexedDB.open('html-runner-library', 1);
         request.onupgradeneeded = () => {
           const database = request.result;
-          database.createObjectStore('files', { keyPath: 'id' });
-          database.createObjectStore('content');
+          if (!database.objectStoreNames.contains('files')) database.createObjectStore('files', { keyPath: 'id' });
+          if (!database.objectStoreNames.contains('content')) database.createObjectStore('content');
         };
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error);
@@ -83,16 +84,95 @@
       return databasePromise;
     }
 
-    function saveFile(file) {
+    function createFileId() {
+      return window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+
+    function saveFile(file, entry) {
       return openDatabase().then(database => new Promise((resolve, reject) => {
-        const id = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         const transaction = database.transaction(['files', 'content'], 'readwrite');
-        transaction.objectStore('files').put({ id, name: file.name, size: file.size, savedAt: Date.now() });
-        transaction.objectStore('content').put(file, id);
+        transaction.objectStore('files').put(entry);
+        transaction.objectStore('content').put(file, entry.id);
         transaction.oncomplete = () => resolve();
         transaction.onerror = () => reject(transaction.error || new Error('Could not save the file.'));
         transaction.onabort = () => reject(transaction.error || new Error('Could not save the file.'));
       }));
+    }
+
+    function saveInWorker(file, entry) {
+      const workerSource = `
+        self.onmessage = event => {
+          const file = event.data.file;
+          const entry = event.data.entry;
+          if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => false);
+          const request = indexedDB.open('html-runner-library', 1);
+          request.onupgradeneeded = () => {
+            const database = request.result;
+            if (!database.objectStoreNames.contains('files')) database.createObjectStore('files', { keyPath: 'id' });
+            if (!database.objectStoreNames.contains('content')) database.createObjectStore('content');
+          };
+          request.onerror = () => self.postMessage({ ok: false, error: 'Could not open local storage.' });
+          request.onsuccess = () => {
+            const database = request.result;
+            const transaction = database.transaction(['files', 'content'], 'readwrite');
+            transaction.objectStore('files').put(entry);
+            transaction.objectStore('content').put(file, entry.id);
+            transaction.oncomplete = () => {
+              database.close();
+              self.postMessage({ ok: true });
+            };
+            transaction.onerror = () => {
+              const error = transaction.error;
+              database.close();
+              self.postMessage({ ok: false, error: error && error.message });
+            };
+            transaction.onabort = () => {
+              const error = transaction.error;
+              database.close();
+              self.postMessage({ ok: false, error: error && error.message });
+            };
+          };
+        };
+      `;
+      let worker;
+      let workerUrl;
+      try {
+        workerUrl = URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' }));
+        worker = new Worker(workerUrl);
+      } catch (error) {
+        if (workerUrl) URL.revokeObjectURL(workerUrl);
+        statusText.textContent = 'Running; saving asynchronously on the main thread.';
+        return saveFile(file, entry);
+      }
+      URL.revokeObjectURL(workerUrl);
+      return new Promise((resolve, reject) => {
+        let finished = false;
+        const finish = callback => value => {
+          if (finished) return;
+          finished = true;
+          worker.terminate();
+          callback(value);
+        };
+        worker.onmessage = event => {
+          if (event.data.ok) finish(resolve)();
+          else finish(reject)(new Error(event.data.error || 'Could not save the file.'));
+        };
+        worker.onerror = () => {
+          if (finished) return;
+          finished = true;
+          worker.terminate();
+          statusText.textContent = 'Running; saving asynchronously on the main thread.';
+          saveFile(file, entry).then(resolve, reject);
+        };
+        try {
+          worker.postMessage({ file, entry });
+        } catch (error) {
+          finished = true;
+          worker.terminate();
+          statusText.textContent = 'Running; saving asynchronously on the main thread.';
+          saveFile(file, entry).then(resolve, reject);
+        }
+      });
     }
 
     function getSavedFiles() {
@@ -172,6 +252,29 @@
       }
     }
 
+    function runSelectedFile(file) {
+      const target = getResultTab();
+      if (!target) {
+        statusText.textContent = 'Allow pop-ups to run this file.';
+        return false;
+      }
+      try {
+        displayFile(target.tab, file, file.name);
+      } catch (error) {
+        if (target.created && !target.tab.closed) target.tab.close();
+        statusText.textContent = 'Could not run this file.';
+        return false;
+      }
+      const entry = { id: createFileId(), name: file.name, size: file.size, savedAt: Date.now() };
+      statusText.textContent = 'Running; saving in the background...';
+      saveInWorker(file, entry).then(() => renderLibrary()).then(() => {
+        statusText.textContent = 'Running; saved in this browser.';
+      }).catch(() => {
+        statusText.textContent = 'Running, but could not save. Browser storage may be full or unavailable.';
+      });
+      return true;
+    }
+
     function openSavedFile(entry) {
       const target = getResultTab();
       if (!target) {
@@ -238,28 +341,24 @@
 
     upload.addEventListener('click', () => {
       if (choosingFile || upload.disabled) return;
+      if (selectedFile) {
+        if (runSelectedFile(selectedFile)) {
+          selectedFile = null;
+          upload.textContent = 'Upload HTML';
+        }
+        return;
+      }
       choosingFile = true;
       fileInput.click();
     });
 
     fileInput.addEventListener('change', () => {
       choosingFile = false;
-      const file = fileInput.files && fileInput.files[0];
+      selectedFile = fileInput.files && fileInput.files[0];
       fileInput.value = '';
-      if (!file) return;
-      upload.disabled = true;
-      upload.textContent = 'Saving...';
-      statusText.textContent = 'Saving locally...';
-      Promise.resolve().then(() => {
-        if (navigator.storage && navigator.storage.persist) return navigator.storage.persist().catch(() => false);
-      }).then(() => saveFile(file)).then(() => renderLibrary()).then(() => {
-        statusText.textContent = 'Saved in this browser.';
-      }).catch(() => {
-        statusText.textContent = 'Could not save. Browser storage may be full or unavailable.';
-      }).finally(() => {
-        upload.disabled = false;
-        upload.textContent = 'Upload HTML';
-      });
+      if (!selectedFile) return;
+      upload.textContent = 'Run HTML';
+      statusText.textContent = 'Ready to run.';
     });
 
     fileInput.addEventListener('cancel', () => {
