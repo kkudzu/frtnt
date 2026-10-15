@@ -49,17 +49,6 @@
 
     upload.addEventListener('click', () => {
       if (choosingFile) return;
-      if (!resultTab || resultTab.closed) {
-        resultTab = window.open('about:blank', '_blank');
-        newTabForSelection = true;
-        if (!resultTab) {
-          newTabForSelection = false;
-          window.alert('Allow pop-ups for this page, then try again.');
-          return;
-        }
-      } else {
-        resultTab.focus();
-      }
       choosingFile = true;
       fileInput.click();
     });
@@ -73,6 +62,18 @@
 
       const objectUrl = URL.createObjectURL(file);
       try {
+        if (!resultTab || resultTab.closed) {
+          resultTab = window.open('about:blank', '_blank');
+          newTabForSelection = true;
+        } else {
+          resultTab.focus();
+        }
+        if (!resultTab) {
+          newTabForSelection = false;
+          URL.revokeObjectURL(objectUrl);
+          window.alert('Allow pop-ups for this page, then upload the file again.');
+          return;
+        }
         const tab = resultTab;
         if (!tab.__htmlRunnerReady) {
           tab.document.open();
