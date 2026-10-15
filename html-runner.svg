@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" viewBox="0 0 960 600" role="img" aria-label="HTML file runner">
+  <title>HTML file runner</title>
+  <rect width="960" height="600" fill="#f3f5f2" />
+  <foreignObject x="0" y="0" width="960" height="600">
+    <xhtml:div xmlns="http://www.w3.org/1999/xhtml" class="stage">
+      <xhtml:button id="upload" type="button">Upload HTML</xhtml:button>
+      <xhtml:input id="file" type="file" accept=".html,.htm,text/html" hidden="hidden" />
+    </xhtml:div>
+  </foreignObject>
+  <style>
+    .stage {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      place-items: center;
+      font-family: ui-sans-serif, system-ui, sans-serif;
+    }
+    button {
+      min-width: 180px;
+      min-height: 56px;
+      padding: 0 28px;
+      border: 0;
+      border-radius: 4px;
+      background: #174b3b;
+      color: #fff;
+      font: 600 16px ui-sans-serif, system-ui, sans-serif;
+      cursor: pointer;
+    }
+    button:hover { background: #103b2f; }
+    button:focus-visible { outline: 3px solid #d28a38; outline-offset: 4px; }
+  </style>
+  <script><![CDATA[
+    const upload = document.getElementById('upload');
+    const fileInput = document.getElementById('file');
+    let resultTab;
+    let newTabForSelection = false;
+    let choosingFile = false;
+
+    function finishSelection() {
+      choosingFile = false;
+      fileInput.value = '';
+      if (newTabForSelection && resultTab && !resultTab.closed) {
+        resultTab.close();
+        resultTab = null;
+      }
+      newTabForSelection = false;
+    }
+
+    upload.addEventListener('click', () => {
+      if (choosingFile) return;
+      if (!resultTab || resultTab.closed) {
+        resultTab = window.open('about:blank', '_blank');
+        newTabForSelection = true;
+        if (!resultTab) {
+          newTabForSelection = false;
+          window.alert('Allow pop-ups for this page, then try again.');
+          return;
+        }
+      } else {
+        resultTab.focus();
+      }
+      choosingFile = true;
+      fileInput.click();
+    });
+
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) {
+        finishSelection();
+        return;
+      }
+
+      const objectUrl = URL.createObjectURL(file);
+      try {
+        const tab = resultTab;
+        if (!tab.__htmlRunnerReady) {
+          tab.document.open();
+          tab.document.write('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HTML file</title><style>html,body,iframe{width:100%;height:100%;margin:0;border:0;display:block}</style></head><body><iframe id="document"></iframe><script>window.addEventListener("pagehide",function(){if(window.opener&&window.__htmlObjectUrl)window.opener.URL.revokeObjectURL(window.__htmlObjectUrl)})<\/script></body></html>');
+          tab.document.close();
+          tab.__htmlRunnerReady = true;
+        }
+        const frame = tab.document.getElementById('document');
+        const previousUrl = tab.__htmlObjectUrl;
+        tab.__htmlObjectUrl = objectUrl;
+        tab.document.title = file.name;
+        if (previousUrl) {
+          frame.addEventListener('load', () => {
+            if (!tab.closed) frame.src = objectUrl;
+          }, { once: true });
+          frame.src = 'about:blank';
+          URL.revokeObjectURL(previousUrl);
+        } else {
+          frame.src = objectUrl;
+        }
+        newTabForSelection = false;
+      } catch (error) {
+        URL.revokeObjectURL(objectUrl);
+        if (resultTab && !resultTab.closed && newTabForSelection) resultTab.close();
+        if (newTabForSelection) resultTab = null;
+        newTabForSelection = false;
+        window.alert('This browser could not open the selected file.');
+      } finally {
+        choosingFile = false;
+        fileInput.value = '';
+      }
+    });
+
+    fileInput.addEventListener('cancel', finishSelection);
+  ]]></script>
+</svg>
