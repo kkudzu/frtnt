@@ -1,0 +1,248 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 450" width="100%" height="100%">
+  <style>
+    .bg { fill: #0f172a; }
+    .card { fill: #1e293b; rx: 16px; stroke: #334155; stroke-width: 1; }
+    
+    .btn-launch { fill: #3b82f6; cursor: pointer; transition: fill 0.2s; }
+    .btn-launch:hover { fill: #60a5fa; }
+    
+    .btn-commit { fill: #8b5cf6; cursor: pointer; transition: fill 0.2s; }
+    .btn-commit:hover { fill: #a78bfa; }
+    
+    .btn-clear { fill: #dc2626; cursor: pointer; transition: fill 0.2s; }
+    .btn-clear:hover { fill: #f87171; }
+    
+    .title { fill: #f8fafc; font-family: system-ui, -apple-system, sans-serif; font-size: 22px; font-weight: 700; text-anchor: middle; }
+    .status { fill: #94a3b8; font-family: system-ui, -apple-system, sans-serif; font-size: 14px; text-anchor: middle; }
+    .label { fill: #cbd5e1; font-family: system-ui, -apple-system, sans-serif; font-size: 13px; font-weight: 500; text-anchor: middle; }
+    .btn-text { fill: #ffffff; font-family: system-ui, -apple-system, sans-serif; font-size: 14px; font-weight: 600; text-anchor: middle; pointer-events: none; }
+
+    .commit-input {
+      width: 100%;
+      height: 100%;
+      background: #0f172a;
+      border: 1px solid #475569;
+      border-radius: 6px;
+      color: #f8fafc;
+      padding: 0 10px;
+      font-size: 14px;
+      font-family: monospace;
+      text-align: center;
+      box-sizing: border-box;
+    }
+    .commit-input:focus {
+      outline: none;
+      border-color: #3b82f6;
+    }
+  </style>
+
+  <rect width="100%" height="100%" class="bg" />
+  <rect x="40" y="30" width="520" height="390" class="card" />
+
+  <!-- Header & Status -->
+  <text x="300" y="75" class="title">Eaglercraft Offline Launcher</text>
+  <text x="300" y="108" id="statusText" class="status">Ready to load game...</text>
+
+  <!-- Commit Input Section -->
+  <text x="300" y="148" class="label">Specify Commit Hash / Branch:</text>
+  
+    <input type="text" id="commitInput" class="commit-input" value="56ec29f" placeholder="e.g. 56ec29f or main" />
+  
+
+  <!-- Predefined Commit Button (56ec29f) -->
+  <g id="commitPresetGroup">
+    <rect x="150" y="212" width="300" height="46" rx="8" class="btn-commit" />
+    <text x="300" y="240" class="btn-text">Download from commit: 56ec29f</text>
+  </g>
+
+  <!-- Dynamic Launch Button -->
+  <g id="launchGroup">
+    <rect x="90" y="285" width="200" height="48" rx="8" class="btn-launch" />
+    <text x="190" y="314" class="btn-text">Launch Input Commit</text>
+  </g>
+
+  <!-- Clear Cache Button -->
+  <g id="clearGroup">
+    <rect x="310" y="285" width="200" height="48" rx="8" class="btn-clear" />
+    <text x="410" y="314" class="btn-text">Clear Cache</text>
+  </g>
+
+  <script type="text/javascript">
+    <![CDATA[
+    (function() {
+      const DB_NAME = "EaglercraftCacheDB";
+      const STORE_NAME = "game_files";
+
+      const statusText = document.getElementById("statusText");
+      const launchGroup = document.getElementById("launchGroup");
+      const commitPresetGroup = document.getElementById("commitPresetGroup");
+      const clearGroup = document.getElementById("clearGroup");
+      const commitInput = document.getElementById("commitInput");
+
+      function updateStatus(msg) {
+        if (statusText) statusText.textContent = msg;
+      }
+
+      function getUrls(commitRef) {
+        const ref = (commitRef && commitRef.trim()) ? commitRef.trim() : "main";
+        return {
+          ref: ref,
+          rawUrl: "https://media.githubusercontent.com/media/aerograde/eagle-26.2/" + ref + "/dist/direct-connect.html",
+          baseUrl: "https://media.githubusercontent.com/media/aerograde/eagle-26.2/" + ref + "/dist/"
+        };
+      }
+
+      function openDB() {
+        return new Promise((resolve, reject) => {
+          const req = indexedDB.open(DB_NAME);
+
+          req.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+              db.createObjectStore(STORE_NAME);
+            }
+          };
+
+          req.onsuccess = () => {
+            const db = req.result;
+            if (db.objectStoreNames.contains(STORE_NAME)) {
+              resolve(db);
+            } else {
+              const nextVersion = (db.version || 1) + 1;
+              db.close();
+              const upReq = indexedDB.open(DB_NAME, nextVersion);
+              upReq.onupgradeneeded = (e) => {
+                const uDb = e.target.result;
+                if (!uDb.objectStoreNames.contains(STORE_NAME)) {
+                  uDb.createObjectStore(STORE_NAME);
+                }
+              };
+              upReq.onsuccess = () => resolve(upReq.result);
+              upReq.onerror = () => reject(upReq.error);
+            }
+          };
+
+          req.onerror = () => reject(req.error);
+        });
+      }
+
+      async function getStoredGame(db, key) {
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, "readonly");
+          const store = tx.objectStore(STORE_NAME);
+          const req = store.get(key);
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+      }
+
+      async function saveGame(db, key, content) {
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, "readwrite");
+          const store = tx.objectStore(STORE_NAME);
+          const req = store.put(content, key);
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error);
+        });
+      }
+
+      async function clearStoredGame(db) {
+        return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_NAME, "readwrite");
+          const store = tx.objectStore(STORE_NAME);
+          const req = store.clear();
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error);
+        });
+      }
+
+      function launchInAboutBlank(htmlContent, baseUrl) {
+        const win = window.open("about:blank", "_blank");
+        if (!win) {
+          updateStatus("Pop-up blocked! Allow pop-ups and try again.");
+          return;
+        }
+
+        let processedHtml = htmlContent;
+        if (!/<base\s/i.test(processedHtml)) {
+          processedHtml = '<base href="' + baseUrl + '">' + processedHtml;
+        }
+
+        win.document.open();
+        win.document.write(processedHtml);
+        win.document.close();
+        updateStatus("Launched successfully!");
+      }
+
+      async function handleLaunch(commitRef) {
+        try {
+          const { ref, rawUrl, baseUrl } = getUrls(commitRef);
+          const gameKey = "eaglercraft_index_" + ref;
+
+          updateStatus("Opening IndexedDB (" + ref + ")...");
+          const db = await openDB();
+
+          updateStatus("Checking cached version for [" + ref + "]...");
+          let cachedHtml = await getStoredGame(db, gameKey);
+
+          if (cachedHtml && !cachedHtml.trim().startsWith("version https://git-lfs.github.com/spec/v1")) {
+            updateStatus("Loaded commit [" + ref + "] from cache! Launching...");
+            launchInAboutBlank(cachedHtml, baseUrl);
+          } else {
+            updateStatus("Downloading commit [" + ref + "] (~89 MB)...");
+            const response = await fetch(rawUrl);
+            if (!response.ok) {
+              throw new Error("HTTP " + response.status + " - Commit '" + ref + "' not found");
+            }
+            const text = await response.text();
+
+            if (text.trim().startsWith("version https://git-lfs.github.com/spec/v1")) {
+              throw new Error("Received LFS pointer instead of file.");
+            }
+
+            updateStatus("Saving to IndexedDB...");
+            await saveGame(db, gameKey, text);
+
+            updateStatus("Launching...");
+            launchInAboutBlank(text, baseUrl);
+          }
+        } catch (err) {
+          console.error(err);
+          updateStatus("Error: " + err.message);
+        }
+      }
+
+      async function handleClear() {
+        try {
+          updateStatus("Opening IndexedDB...");
+          const db = await openDB();
+          updateStatus("Clearing all stored cache...");
+          await clearStoredGame(db);
+          updateStatus("Cache cleared successfully!");
+        } catch (err) {
+          console.error(err);
+          updateStatus("Error clearing cache: " + err.message);
+        }
+      }
+
+      if (launchGroup) {
+        launchGroup.addEventListener("click", function() {
+          const targetCommit = commitInput ? commitInput.value : "56ec29f";
+          handleLaunch(targetCommit);
+        });
+      }
+
+      if (commitPresetGroup) {
+        commitPresetGroup.addEventListener("click", function() {
+          if (commitInput) commitInput.value = "56ec29f";
+          handleLaunch("56ec29f");
+        });
+      }
+
+      if (clearGroup) {
+        clearGroup.addEventListener("click", handleClear);
+      }
+    })();
+    ]]>
+  </script>
+</svg>
